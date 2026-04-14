@@ -153,6 +153,35 @@ export class ChatAgent extends AIChatAgent<Env> {
         }
       }),
 
+      // Math calculation — runs inside the sandbox alongside other tools
+      calculate: tool({
+        description:
+          "Perform a math calculation with two numbers.",
+        inputSchema: z.object({
+          a: z.number().describe("First number"),
+          b: z.number().describe("Second number"),
+          operator: z
+            .enum(["+", "-", "*", "/", "%"])
+            .describe("Arithmetic operator")
+        }),
+        execute: async ({ a, b, operator }) => {
+          const ops: Record<string, (x: number, y: number) => number> = {
+            "+": (x, y) => x + y,
+            "-": (x, y) => x - y,
+            "*": (x, y) => x * y,
+            "/": (x, y) => x / y,
+            "%": (x, y) => x % y
+          };
+          if (operator === "/" && b === 0) {
+            return { error: "Division by zero" };
+          }
+          return {
+            expression: `${a} ${operator} ${b}`,
+            result: ops[operator](a, b)
+          };
+        }
+      }),
+
       // MCP tools from connected servers
       ...mcpTools
     };
@@ -180,39 +209,8 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         toolCalls: "before-last-2-messages"
       }),
       tools: {
-        // Codemode tool: LLM writes orchestration code for multi-step tool use
-        codemode,
-
-        // Approval tool: requires user confirmation — not supported inside codemode yet
-        calculate: tool({
-          description:
-            "Perform a math calculation with two numbers. Requires user approval for large numbers.",
-          inputSchema: z.object({
-            a: z.number().describe("First number"),
-            b: z.number().describe("Second number"),
-            operator: z
-              .enum(["+", "-", "*", "/", "%"])
-              .describe("Arithmetic operator")
-          }),
-          needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
-          execute: async ({ a, b, operator }) => {
-            const ops: Record<string, (x: number, y: number) => number> = {
-              "+": (x, y) => x + y,
-              "-": (x, y) => x - y,
-              "*": (x, y) => x * y,
-              "/": (x, y) => x / y,
-              "%": (x, y) => x % y
-            };
-            if (operator === "/" && b === 0) {
-              return { error: "Division by zero" };
-            }
-            return {
-              expression: `${a} ${operator} ${b}`,
-              result: ops[operator](a, b)
-            };
-          }
-        })
+        // Codemode: LLM writes one JS script that orchestrates all tools in parallel
+        codemode
       },
       stopWhen: stepCountIs(5),
       abortSignal: options?.abortSignal
