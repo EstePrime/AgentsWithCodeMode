@@ -11,6 +11,8 @@ import {
   type ModelMessage
 } from "ai";
 import { z } from "zod";
+import { createCodeTool } from "@cloudflare/codemode/ai";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 
 /**
  * The AI SDK's downloadAssets step runs `new URL(data)` on every file
@@ -69,6 +71,100 @@ export class ChatAgent extends AIChatAgent<Env> {
     const mcpTools = this.mcp.getAITools();
     const workersai = createWorkersAI({ binding: this.env.AI });
 
+    // Tools that can run inside the codemode sandbox (no approval required).
+    // The codemode LLM can chain and compose these freely.
+    const codemodeTools = {
+      // Server-side tool: runs automatically on the server
+      getWeather: tool({
+        description: "Get the current weather for a city",
+        inputSchema: z.object({
+          city: z.string().describe("City name")
+        }),
+        execute: async ({ city }) => {
+          // Replace with a real weather API in production
+          const conditions = ["sunny", "cloudy", "rainy", "snowy"];
+          const temp = Math.floor(Math.random() * 30) + 5;
+          return {
+            city,
+            temperature: temp,
+            condition:
+              conditions[Math.floor(Math.random() * conditions.length)],
+            unit: "celsius"
+          };
+        }
+      }),
+
+      // Client-side tool: no execute function — the browser handles it
+      getUserTimezone: tool({
+        description:
+          "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
+        inputSchema: z.object({})
+      }),
+
+      scheduleTask: tool({
+        description:
+          "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
+        inputSchema: scheduleSchema,
+        execute: async ({ when, description }) => {
+          if (when.type === "no-schedule") {
+            return "Not a valid schedule input";
+          }
+          const input =
+            when.type === "scheduled"
+              ? when.date
+              : when.type === "delayed"
+                ? when.delayInSeconds
+                : when.type === "cron"
+                  ? when.cron
+                  : null;
+          if (!input) return "Invalid schedule type";
+          try {
+            this.schedule(input, "executeTask", description, {
+              idempotent: true
+            });
+            return `Task scheduled: "${description}" (${when.type}: ${input})`;
+          } catch (error) {
+            return `Error scheduling task: ${error}`;
+          }
+        }
+      }),
+
+      getScheduledTasks: tool({
+        description: "List all tasks that have been scheduled",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const tasks = this.getSchedules();
+          return tasks.length > 0 ? tasks : "No scheduled tasks found.";
+        }
+      }),
+
+      cancelScheduledTask: tool({
+        description: "Cancel a scheduled task by its ID",
+        inputSchema: z.object({
+          taskId: z.string().describe("The ID of the task to cancel")
+        }),
+        execute: async ({ taskId }) => {
+          try {
+            this.cancelSchedule(taskId);
+            return `Task ${taskId} cancelled.`;
+          } catch (error) {
+            return `Error cancelling task: ${error}`;
+          }
+        }
+      }),
+
+      // MCP tools from connected servers
+      ...mcpTools
+    };
+
+    const executor = new DynamicWorkerExecutor({
+      loader: this.env.LOADER
+    });
+
+    // createCodeTool lets the LLM write JS that chains the above tools,
+    // running in an isolated Worker sandbox via Workers RPC.
+    const codemode = createCodeTool({ tools: codemodeTools, executor });
+
     const result = streamText({
       model: workersai("@cf/moonshotai/kimi-k2.5", {
         sessionAffinity: this.sessionAffinity
@@ -84,37 +180,10 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         toolCalls: "before-last-2-messages"
       }),
       tools: {
-        // MCP tools from connected servers
-        ...mcpTools,
+        // Codemode tool: LLM writes orchestration code for multi-step tool use
+        codemode,
 
-        // Server-side tool: runs automatically on the server
-        getWeather: tool({
-          description: "Get the current weather for a city",
-          inputSchema: z.object({
-            city: z.string().describe("City name")
-          }),
-          execute: async ({ city }) => {
-            // Replace with a real weather API in production
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
-          }
-        }),
-
-        // Client-side tool: no execute function — the browser handles it
-        getUserTimezone: tool({
-          description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
-          inputSchema: z.object({})
-        }),
-
-        // Approval tool: requires user confirmation before executing
+        // Approval tool: requires user confirmation — not supported inside codemode yet
         calculate: tool({
           description:
             "Perform a math calculation with two numbers. Requires user approval for large numbers.",
@@ -142,58 +211,6 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
               expression: `${a} ${operator} ${b}`,
               result: ops[operator](a, b)
             };
-          }
-        }),
-
-        scheduleTask: tool({
-          description:
-            "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
-          inputSchema: scheduleSchema,
-          execute: async ({ when, description }) => {
-            if (when.type === "no-schedule") {
-              return "Not a valid schedule input";
-            }
-            const input =
-              when.type === "scheduled"
-                ? when.date
-                : when.type === "delayed"
-                  ? when.delayInSeconds
-                  : when.type === "cron"
-                    ? when.cron
-                    : null;
-            if (!input) return "Invalid schedule type";
-            try {
-              this.schedule(input, "executeTask", description, {
-                idempotent: true
-              });
-              return `Task scheduled: "${description}" (${when.type}: ${input})`;
-            } catch (error) {
-              return `Error scheduling task: ${error}`;
-            }
-          }
-        }),
-
-        getScheduledTasks: tool({
-          description: "List all tasks that have been scheduled",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const tasks = this.getSchedules();
-            return tasks.length > 0 ? tasks : "No scheduled tasks found.";
-          }
-        }),
-
-        cancelScheduledTask: tool({
-          description: "Cancel a scheduled task by its ID",
-          inputSchema: z.object({
-            taskId: z.string().describe("The ID of the task to cancel")
-          }),
-          execute: async ({ taskId }) => {
-            try {
-              this.cancelSchedule(taskId);
-              return `Task ${taskId} cancelled.`;
-            } catch (error) {
-              return `Error cancelling task: ${error}`;
-            }
           }
         })
       },

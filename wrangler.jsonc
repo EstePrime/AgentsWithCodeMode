@@ -41,6 +41,11 @@
 	"observability": {
 		"enabled": true
 	},
+	"worker_loaders": [
+		{
+			"binding": "LOADER"
+		}
+	],
 	"upload_source_maps": true
 	/**
 	 * Smart Placement
