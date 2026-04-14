@@ -1,4 +1,4 @@
-# testagents
+# AgentsWithCodeMode
 
 Experiment with Cloudflare Agents and CodeMode. Based on [Agent Starter](https://github.com/cloudflare/agents-starter) ⛅
 
